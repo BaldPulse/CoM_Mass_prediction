@@ -22,20 +22,24 @@ def get_PC_stats(dir):
         mean_std = np.load(os.path.join(dir, 'mean_std.npy'))
         pc_mean = mean_std[0]
         pc_std = mean_std[1]
+        lbl_mean = np.mean(target_values, axis=(0,1))
+        lbl_std = np.std(target_values, axis=(0,1))
     except:
         # if the file doesn't exist, calculate the mean and std of the point clouds
         PC_data, target_values = load_data(dir)
         pc_mean = np.mean(PC_data, axis=(0,1))
         pc_std = np.std(PC_data, axis=(0,1))
-        np.save(os.path.join(dir, 'mean_std.npy'), [pc_mean, pc_std])
-    return pc_mean, pc_std
+        lbl_mean = np.mean(target_values, axis=(0,1))
+        lbl_std = np.std(target_values, axis=(0,1))
+        np.save(os.path.join(dir, 'mean_std.npy'), [pc_mean, pc_std, lbl_mean, lbl_std])
+    return pc_mean, pc_std, lbl_mean, lbl_std
 
 
-def normalize_data(PC_data, target_values, pc_mean, pc_std):
+def normalize_data(PC_data, target_values, pc_mean, pc_std, lbl_mean, lbl_std):
     # normalize the point cloud
     Norm_PC = (PC_data - pc_mean) / pc_std
     # normalize the first 3 columns of the target values
     Norm_Target_Values = np.zeros(target_values.shape)
-    Norm_Target_Values[:, :, :3] = (target_values[:, :, :3] - pc_mean) / pc_std
-    Norm_Target_Values[:, :, 3] = target_values[:, :, 3]
+    Norm_Target_Values[:, :, :3] = (target_values[:, :, :3] - lbl_mean[:3]) / lbl_std[:3]
+    Norm_Target_Values[:, :, 3] = target_values[:, :, 3] # don't normalize the last column
     return Norm_PC, Norm_Target_Values

@@ -1,5 +1,11 @@
+import shutil
 from model import *
 from data import *
+
+
+# delete the log folder
+if os.path.exists(os.path.join(BASE_DIR, 'log')):
+    shutil.rmtree(os.path.join(BASE_DIR, 'log'))
 
 # load the data
 print(BASE_DIR)
@@ -12,10 +18,12 @@ print("Shape of the target values: ", DATA['target_values'].shape)
 
 
 
-
 # normalize the data
-pc_mean, pc_std = get_PC_stats(os.path.join(BASE_DIR, 'data', '0'))
-Norm_PC, Norm_Target_Values = normalize_data(DATA['pc'], DATA['target_values'], pc_mean, pc_std)
+# pc_mean, pc_std, lbl_mean, lbl_std  = get_PC_stats(os.path.join(BASE_DIR, 'data', '0'))
+# Norm_PC, Norm_Target_Values = normalize_data(DATA['pc'], DATA['target_values'], pc_mean, pc_std, lbl_mean, lbl_std)
+
+Norm_PC = DATA['pc']
+Norm_Target_Values = DATA['target_values']
 
 # randomize the data
 idx = np.arange(Norm_PC.shape[0])
@@ -23,13 +31,15 @@ np.random.shuffle(idx)
 PC_shuffled = Norm_PC[idx]
 Target_Values_shuffled = Norm_Target_Values[idx]
 
-# train eval split; first 80% for training, last 20% for evaluation
-train_idx = range(int(0.8*PC_shuffled.shape[0]))
-eval_idx = range(int(0.8*PC_shuffled.shape[0]), PC_shuffled.shape[0])
+# train eval split; first 90% for training, last 10% for evaluation
+train_idx = range(int(0.9*PC_shuffled.shape[0]))
+eval_idx = range(int(0.9*PC_shuffled.shape[0]), PC_shuffled.shape[0])
 
 # training data
 train_data = PC_shuffled[train_idx]
 train_target_values = Target_Values_shuffled[train_idx]
+print ("train_data: ", train_data.shape)
+print ("train_target_values: ", train_target_values.shape)
 
 # evaluation data
 eval_data = PC_shuffled[eval_idx]
@@ -37,13 +47,25 @@ eval_target_values = Target_Values_shuffled[eval_idx]
 
 
 # hyperparameters
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 NUM_EPOCHS = 100
 NUM_POINT = 5000
 LEARNING_RATE = 0.001
 
+# create log folder
+if not os.path.exists(os.path.join(BASE_DIR, 'log')):
+    os.mkdir(os.path.join(BASE_DIR, 'log'))
+LOG_FOUT = open(os.path.join(BASE_DIR, 'log', 'log_train.txt'), 'w')
+def log_string(out_str):
+    LOG_FOUT.write(out_str+'\n')
+    LOG_FOUT.flush()
+    print(out_str)
+
 
 def train():
+    last_eval_loss = 1000000
+    consecutive_eval_loss_increase = 0
+    
     with tf.Graph().as_default():
         with tf.device('/gpu:'+"0"):
             pointclouds_pl = tf.placeholder(tf.float32, shape=(BATCH_SIZE, NUM_POINT, 3))
@@ -74,11 +96,12 @@ def train():
 
         # Add summary writers
         merged = tf.summary.merge_all()
-        train_writer = tf.summary.FileWriter(os.path.join(BASE_DIR, 'log', 'train'), sess.graph)   
+        train_writer = tf.summary.FileWriter(os.path.join(BASE_DIR, 'log', 'train'), sess.graph) 
+        test_writer = tf.summary.FileWriter(os.path.join(BASE_DIR, 'log', 'test'), sess.graph)  
+
 
         # create a global step variable
         tf.train.create_global_step(sess.graph)
-
         # Init variables
         init = tf.global_variables_initializer()
 
@@ -100,11 +123,6 @@ def train():
                 'step': tf.train.get_global_step()
                 }
 
-        LOG_FOUT = open(os.path.join(BASE_DIR, 'log', 'log_train.txt'), 'w')
-        def log_string(out_str):
-            LOG_FOUT.write(out_str+'\n')
-            LOG_FOUT.flush()
-            print(out_str)
 
         for epoch in range(NUM_EPOCHS):
             log_string('**** EPOCH %03d ****' % (epoch))
@@ -116,9 +134,21 @@ def train():
 
             # every 10 epochs, save the model into a checkpoint file
             # the checkpoint file should be separate for each epoch
-            if epoch % 10 == 0:
+            if (epoch+1) % 5 == 0:
+                # evaluate the model on the evaluation data
+                eval_loss = eval_model(sess, ops, test_writer)
                 save_path = saver.save(sess, os.path.join(BASE_DIR, 'log', 'model.ckpt'))
                 log_string("Model saved in file: %s" % save_path)
+
+                # if the loss if not decreasing, stop the training
+                if epoch > 0 and eval_loss > last_eval_loss:
+                    consecutive_eval_loss_increase += 1
+                else:
+                    last_eval_loss = eval_loss
+                    
+                if consecutive_eval_loss_increase > 3:
+                    log_string("Loss is not decreasing, stop training.")
+                    break
         
         LOG_FOUT.close()
 
@@ -148,12 +178,18 @@ def train_one_epoch(sess, ops, train_writer):
         train_writer.add_summary(summary, step)
 
         if batch % 10 == 0:
-            print('batch: ', batch, ' loss: ', loss_val)
+            log_string('batch: '+ str(batch)+ ' loss: '+ str(loss_val))
+            # # sanity check, manually calculate the loss
+            # # manually calculate the loss
+            # loss = np.sum(np.square(pred[:, :, :3] - batch_target_values[:, :, :3]))/BATCH_SIZE/NUM_POINT
+            # print("loss: ", loss)
+            sys.stdout.flush()
+
     
 
 
 def eval_model(sess, ops, test_writer):
-    is_training = False
+    is_training = True
 
     # eval on eval data
     eval_loss = 0
@@ -167,10 +203,15 @@ def eval_model(sess, ops, test_writer):
         feed_dict = {ops['pointclouds_pl']: batch_data,
                      ops['labels_pl']: batch_target_values,
                      ops['is_training_pl']: is_training,}
-        summary, step, loss_val = sess.run([ops['merged'], ops['step'],
-            ops['loss']], feed_dict=feed_dict)
+        summary, step, loss_val, pred = sess.run([ops['merged'], ops['step'],
+            ops['loss'], ops['pred']], feed_dict=feed_dict)
         test_writer.add_summary(summary, step)
         eval_loss += loss_val
+        if (batch+1) %1 == 0:
+            # sanity check, plot the first point cloud and the predicted center of mass
+            print("tv: ", batch_target_values[0])
+            plot(batch_data[0], pred[0], batch_target_values[0,:,0:3])
+
     eval_loss /= (len(eval_data)//BATCH_SIZE)
     print('eval loss: %f' % (eval_loss))
     return eval_loss
