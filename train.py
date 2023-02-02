@@ -1,29 +1,45 @@
 from model import *
+from data import *
 
 # load the data
 print(BASE_DIR)
-DATA = np.load(os.path.join(BASE_DIR, 'data', 'data.npz'), allow_pickle=True)
-print("Loaded data with headers ", DATA.files)
-print("Valid line numbers: ", DATA['valid_count'])
+DATA = {}
+# load every file in the data folder
+DATA['pc'], DATA['target_values'] = load_data(os.path.join(BASE_DIR, 'data', '0'))
+# print the shape of the data
+print("Shape of the point cloud: ", DATA['pc'].shape)
+print("Shape of the target values: ", DATA['target_values'].shape)
+
+
+
+
+# normalize the data
+pc_mean, pc_std = get_PC_stats(os.path.join(BASE_DIR, 'data', '0'))
+Norm_PC, Norm_Target_Values = normalize_data(DATA['pc'], DATA['target_values'], pc_mean, pc_std)
+
+# randomize the data
+idx = np.arange(Norm_PC.shape[0])
+np.random.shuffle(idx)
+PC_shuffled = Norm_PC[idx]
+Target_Values_shuffled = Norm_Target_Values[idx]
 
 # train eval split; first 80% for training, last 20% for evaluation
-train_idx = np.arange(0, int(0.8*DATA["valid_count"]))
-eval_idx = np.arange(int(0.8*DATA["valid_count"]), DATA["valid_count"])
+train_idx = range(int(0.8*PC_shuffled.shape[0]))
+eval_idx = range(int(0.8*PC_shuffled.shape[0]), PC_shuffled.shape[0])
 
 # training data
-train_data = DATA['pc'][train_idx]
-train_target_values = DATA['target_values'][train_idx]
-
+train_data = PC_shuffled[train_idx]
+train_target_values = Target_Values_shuffled[train_idx]
 
 # evaluation data
-eval_data = DATA['pc'][eval_idx]
-eval_target_values = DATA['target_values'][eval_idx]
+eval_data = PC_shuffled[eval_idx]
+eval_target_values = Target_Values_shuffled[eval_idx]
 
 
 # hyperparameters
 BATCH_SIZE = 32
 NUM_EPOCHS = 100
-NUM_POINT = 20000
+NUM_POINT = 5000
 LEARNING_RATE = 0.001
 
 
@@ -36,13 +52,13 @@ def train():
             
             # create the model
             pred, end_points = get_model(pointclouds_pl, is_training_pl, bn_decay=None)
-
-            # loss
-            loss = tf.reduce_mean(tf.square(pred-labels_pl))
+            print("pred: ", pred)
+            # loss,
+            loss = tf.reduce_mean( tf.reduce_sum(tf.squared_difference(pred[:, :, :3], labels_pl[:, :, :3]), axis=-1 ) )
             tf.summary.scalar('loss', loss)
 
             # optimizer
-            optimizer = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)
+            optimizer = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE, name='Adam')
             train_op = optimizer.minimize(loss)
 
             # add ops to save and restore all the variables
@@ -58,14 +74,10 @@ def train():
 
         # Add summary writers
         merged = tf.summary.merge_all()
-        train_writer = tf.summary.FileWriter(os.path.join(BASE_DIR, 'log', 'train'), sess.graph)
-        test_writer = tf.summary.FileWriter(os.path.join(BASE_DIR, 'log', 'test'))
+        train_writer = tf.summary.FileWriter(os.path.join(BASE_DIR, 'log', 'train'), sess.graph)   
 
-
-        # Create a variable to hold the global_step.
-        global_step_tensor  = tf.Variable(0)
-        # init the global step
-        global_step_tensor.initializer.run(session=sess)
+        # create a global step variable
+        tf.train.create_global_step(sess.graph)
 
         # Init variables
         init = tf.global_variables_initializer()
@@ -85,7 +97,7 @@ def train():
                 'loss': loss,
                 'train_op': train_op,
                 'merged': merged,
-                'step': global_step_tensor
+                'step': tf.train.get_global_step()
                 }
 
         LOG_FOUT = open(os.path.join(BASE_DIR, 'log', 'log_train.txt'), 'w')
@@ -99,13 +111,14 @@ def train():
             sys.stdout.flush()
 
             train_one_epoch(sess, ops, train_writer)
+            # write the loss of this epoch into the log file
 
-            # Save the variables to disk.
+
+            # every 10 epochs, save the model into a checkpoint file
+            # the checkpoint file should be separate for each epoch
             if epoch % 10 == 0:
                 save_path = saver.save(sess, os.path.join(BASE_DIR, 'log', 'model.ckpt'))
                 log_string("Model saved in file: %s" % save_path)
-                # eval the current model on eval data
-                eval_model(sess, ops, test_writer)
         
         LOG_FOUT.close()
 
@@ -118,6 +131,7 @@ def train_one_epoch(sess, ops, train_writer):
     train_file_idxs = np.arange(0, len(train_data))
     np.random.shuffle(train_file_idxs)
 
+
     # batch training
     for batch in range(len(train_data)//BATCH_SIZE):
         start_idx = batch * BATCH_SIZE
@@ -125,18 +139,16 @@ def train_one_epoch(sess, ops, train_writer):
 
         batch_data = train_data[train_file_idxs[start_idx:end_idx]]
         batch_target_values = train_target_values[train_file_idxs[start_idx:end_idx]]
-        # convert batch data and target values to array
-        # currently the data is a list of numpy arrays
 
-        
         feed_dict = {ops['pointclouds_pl']: batch_data,
                      ops['labels_pl']: batch_target_values,
                      ops['is_training_pl']: is_training,}
-        summary, step, _, loss_val = sess.run([ops['merged'], ops['step'],
-            ops['train_op'], ops['loss']], feed_dict=feed_dict)
+        summary, step, _, loss_val, pred = sess.run([ops['merged'], ops['step'],
+            ops['train_op'], ops['loss'], ops['pred']], feed_dict=feed_dict)
         train_writer.add_summary(summary, step)
+
         if batch % 10 == 0:
-            print('batch: %d, loss: %f' % (batch, loss_val))
+            print('batch: ', batch, ' loss: ', loss_val)
     
 
 
@@ -161,6 +173,7 @@ def eval_model(sess, ops, test_writer):
         eval_loss += loss_val
     eval_loss /= (len(eval_data)//BATCH_SIZE)
     print('eval loss: %f' % (eval_loss))
+    return eval_loss
 
 if __name__ == "__main__":
     train()

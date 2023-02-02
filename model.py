@@ -24,11 +24,6 @@ from tf_grouping import query_ball_point, group_point, knn_point
 # see if my gpu is working
 print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
 
-# # run a simple thing on the gpu
-# with tf.device('/gpu:0'):
-#     a = tf.constant([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], shape=[2, 3], name='a')
-#     b = tf.constant([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], shape=[3, 2], name='b')
-#     c = tf.matmul(a, b)
 
 
 def get_model(point_cloud, is_training, bn_decay):
@@ -63,16 +58,31 @@ def get_model(point_cloud, is_training, bn_decay):
     net = tf_util.conv1d(net, 32, 1, padding='VALID', bn=True, 
         is_training=is_training, scope='conv1d-fc2', bn_decay=bn_decay)
     end_points["fc_features"] = net
-    CoMM = tf_util.conv1d(net, 4, 1, padding='VALID', 
+    CoMM = tf_util.conv1d(net, 3, 1, padding='VALID', 
         activation_fn=None, scope='conv1d-fc3')
     return CoMM, end_points
 
-def loss(pred, label):
-    """ pred: B*N*4,
-        label: B*N*4, """
-    # compute the distance between the predicted and the ground truth
-    dist = tf.reduce_sum((pred - label)**2, axis=2)
-    # compute the loss
-    loss = tf.reduce_mean(dist)
-    tf.summary.scalar('loss', loss)
-    return loss
+def get_CoM(pred, pc):
+    '''
+    use RANSAC to get the center of mass
+    '''
+    # first convert the predicted to predicted CoM
+    pred_CoM = pc - pred
+    # then use RANSAC to get the center of mass
+    for i in range(10):
+        # randomly select 3 points
+        idx = np.random.choice(pred_CoM.shape[0], 3, replace=False)
+        # get the center of mass
+        CoM = np.mean(pred_CoM[idx], axis=0)
+        # get the distance between the center of mass and the points
+        dist = np.sqrt(np.sum((pred_CoM - CoM)**2, axis=1))
+        # get the inliers
+        inliers = pred_CoM[dist < 0.03]
+        # get the number of inliers
+        num_inliers = inliers.shape[0]
+        # if the number of inliers is larger than 100, then we can break the loop
+        if num_inliers > 100:
+            break
+    # get the center of mass
+    CoM = np.mean(inliers, axis=0)
+    return CoM
